@@ -80,7 +80,8 @@ const relProf = $("#relProf"),
 ========================================= */
 const formatCurrency = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v || 0);
 const formatDate = (ts) => ts ? new Date(ts.seconds * 1000).toLocaleDateString("pt-BR") : "—";
-const ymdToDateStr = (ymd) => new Date(`${ymd}T00:00:00`).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+const ymdToDateStr = (ymd) =>
+    ymd ? new Date(`${ymd}T00:00:00`).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) : "—";
 const showNotification = (message, type = "success") => {
     const container = $("#notification-container"), el = document.createElement("div");
     el.className = `notification ${type}`;
@@ -98,6 +99,25 @@ const formatPhoneNumber = (phone) => {
     return phone;
 };
 const normalize = (s) => (s || "").toString().trim().toLowerCase();
+
+// Normalizador robusto de data para ISO (YYYY-MM-DD)
+const ensureISODate = (input) => {
+    if (!input) return "";
+    const s = String(input).trim();
+
+    // 1) Já está em ISO
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // 2) DD/MM/YYYY ou DD-MM-YYYY
+    let m = s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+    if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+
+    // 3) Tentativa genérica
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+
+    return ""; // desconhecido
+};
 
 /* =========================================
    Clientes
@@ -339,7 +359,10 @@ async function buscarAgenda() {
     const prof = profissionalSelect.value;
     const ymd = dataFiltro.value || "";
     const hh = horaFiltro.value || "";
-    if (!prof) return;
+    if (!prof) {
+        agendaGrid.innerHTML = `<div class="loading-row">Selecione um profissional.</div>`;
+        return;
+    }
 
     agendaGrid.innerHTML = `
     <div class="loading-row" style="background:#fff;border-radius:12px;border:1px solid var(--border);">
@@ -353,7 +376,7 @@ async function buscarAgenda() {
         ]);
 
         const filtered = [...ag, ...res].filter((it) => {
-            const okDate = !ymd ? true : normalize(it.dataISO || it.data) === normalize(ymd);
+            const okDate = !ymd ? true : normalize(ensureISODate(it.dataISO || it.data)) === normalize(ymd);
             const okHour = !hh ? true : getHourKey(it) === hh;
             return okDate && okHour;
         });
@@ -414,7 +437,7 @@ async function openEditAny(source, id, collOpt) {
         <div class="form-grid">
           <div class="field"><label>Cliente</label><input id="modalEditCliente" value="${data.clienteNome || ""}"></div>
           <div class="form-row">
-            <div class="field"><label>Data</label><input type="date" id="modalEditDate" value="${data.dataISO || ""}"></div>
+            <div class="field"><label>Data</label><input type="date" id="modalEditDate" value="${ensureISODate(data.dataISO || data.data) || ""}"></div>
             <div class="field"><label>Hora</label><select id="modalEditTime">${HOURS_OPTS}</select></div>
           </div>
           <div class="form-row">
@@ -460,7 +483,7 @@ async function openEditAny(source, id, collOpt) {
           <div class="field"><label>Nome</label><input id="rNome" value="${d.nome || ""}"></div>
 
           <div class="form-row">
-            <div class="field"><label>Data</label><input type="date" id="rData" value="${d.data || ""}"></div>
+            <div class="field"><label>Data</label><input type="date" id="rData" value="${ensureISODate(d.data) || ""}"></div>
             <div class="field"><label>Hora</label><select id="rHora">${HOURS_OPTS}</select></div>
           </div>
 
@@ -604,9 +627,7 @@ const isInISODateRange = (d, de, ate) => {
     return ge && le;
 };
 
-// >>> NOVO LISTENER do botão "Gerar"
-// Consulta apenas por profissional (não requer índice composto).
-// O intervalo De/Até é aplicado no cliente.
+// >>> LISTENER do botão "Gerar" — agora lê AGENDAMENTOS + RESERVAS_PROFISSIONAL
 relGerarBtn.addEventListener("click", async () => {
     const de = relDe.value, ate = relAte.value, prof = relProf.value;
     if (!prof) return showNotification("Escolha o profissional.", "error");
@@ -614,16 +635,45 @@ relGerarBtn.addEventListener("click", async () => {
     relDetalheTbody.innerHTML = `<tr><td colspan="6" class="loading-row">Gerando...</td></tr>`;
 
     try {
-        const q = query(collection(db, "agendamentos"), where("profissional", "==", prof));
-        const snap = await getDocs(q);
+        // 1) Agendamentos
+        const qAg = query(collection(db, "agendamentos"), where("profissional", "==", prof));
+        const snapAg = await getDocs(qAg);
+        const rowsAg = snapAg.docs.map(d => {
+            const x = getCorrectedAppointment({ ...d.data() });
+            const iso = ensureISODate(x.dataISO || x.data);
+            return {
+                ...x,
+                iso,
+                profissional: x.profissional || prof,
+                clienteNome: x.clienteNome || x.cliente || x.nome || "",
+                pagamentoForma: (x.pagamentoForma ?? x.formaPagamento ?? "—"),
+            };
+        });
 
-        reportCache = snap.docs
-            .map((d) => getCorrectedAppointment({ ...d.data() }))
-            .filter((d) => !d.bloqueado && isInISODateRange((d.dataISO || "").trim(), de, ate))
-            .map(d => ({ ...d, pagamentoForma: (d.pagamentoForma ?? d.formaPagamento ?? "—") }));
+        // 2) Reservas do site
+        const qRes = query(collection(db, "reservas_profissional"), where("profissional", "==", prof));
+        const snapRes = await getDocs(qRes);
+        const rowsRes = snapRes.docs.map(d => {
+            const x = { ...d.data() };
+            const iso = ensureISODate(x.dataISO || x.data);
+            return {
+                ...x,
+                iso,
+                profissional: x.profissional || prof,
+                clienteNome: x.clienteNome || x.cliente || x.nome || "",
+                servico: x.servico || x.serviço || "—",
+                valor: typeof x.valor === "number" ? x.valor : 0,
+                pagamentoForma: (x.pagamentoForma ?? x.formaPagamento ?? "—"),
+            };
+        });
 
-        reportCache.sort((a, b) => (a.dataISO + (a.hora || "")).localeCompare(b.dataISO + (b.hora || "")));
+        // 3) Junta, filtra e ordena
+        reportCache = [...rowsAg, ...rowsRes]
+            .filter(r => !r.bloqueado && isInISODateRange(r.iso, de, ate));
 
+        reportCache.sort((a, b) => ((a.iso || "") + (a.hora || "")).localeCompare((b.iso || "") + (b.hora || "")));
+
+        // 4) KPIs
         const qtd = reportCache.length;
         const bruto = reportCache.reduce((s, it) => s + (Number(it.valor) || 0), 0);
         const ticket = qtd ? bruto / qtd : 0;
@@ -631,22 +681,24 @@ relGerarBtn.addEventListener("click", async () => {
         kpiBruto.textContent = formatCurrency(bruto);
         kpiTicket.textContent = formatCurrency(ticket);
 
+        // 5) Tabela
         relDetalheTbody.innerHTML =
             reportCache.length === 0
                 ? `<tr><td colspan="6" class="loading-row">Nenhum resultado.</td></tr>`
                 : reportCache.map((r) => `
           <tr>
-            <td data-label="Data">${ymdToDateStr(r.dataISO)}</td>
+            <td data-label="Data">${ymdToDateStr(r.iso)}</td>
             <td data-label="Profissional">${r.profissional || "—"}</td>
-            <td data-label="Cliente">${r.clienteNome || r.cliente || "—"}</td>
+            <td data-label="Cliente">${r.clienteNome || "—"}</td>
             <td data-label="Serviço">${r.servico || "—"}</td>
             <td data-label="Forma">${r.pagamentoForma || "—"}</td>
             <td data-label="Valor">${formatCurrency(r.valor)}</td>
           </tr>`).join("");
 
+        // 6) Gráfico
         renderReportChart(reportCache);
     } catch (err) {
-        console.error("Erro ao gerar relatório (sem índice): ", err);
+        console.error("Erro ao gerar relatório:", err);
         relDetalheTbody.innerHTML = `<tr><td colspan="6" class="loading-row">Erro ao gerar relatório. Verifique o console.</td></tr>`;
     }
 });
@@ -655,14 +707,16 @@ exportCsv.addEventListener("click", () => {
     if (reportCache.length === 0) return showNotification("Gere um relatório primeiro.", "error");
     const headers = ["Data", "Profissional", "Cliente", "Serviço", "Forma", "Valor"];
     const rows = reportCache.map((r) => [
-        ymdToDateStr(r.dataISO),
+        ymdToDateStr(r.iso),
         r.profissional || "",
-        r.clienteNome || r.cliente || "",
+        r.clienteNome || "",
         r.servico || "",
         (r.pagamentoForma || "—"),
         (Number(r.valor) || 0).toFixed(2).replace(".", ","),
     ]);
-    const csv = [headers, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";")).join("\n");
+    const csv = [headers, ...rows]
+        .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";"))
+        .join("\n");
     const link = document.createElement("a");
     link.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURI(csv);
     link.download = `relatorio_${relDe.value}_a_${relAte.value}.csv`;
@@ -673,7 +727,8 @@ exportCsv.addEventListener("click", () => {
    Pagamentos (mantido)
 ========================================= */
 const renderPayments = (payments) => {
-    const monthly = payments.filter((p) => p.date && p.date.toDate() >= new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+    const firstDay = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const monthly = payments.filter((p) => p.date && p.date.toDate() >= firstDay);
     paymentsTableBody.innerHTML =
         monthly.map((p) => `
       <tr>
@@ -717,18 +772,48 @@ function showTab(tabId) {
 }
 tabBtns.forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
+// Carrega lista real de profissionais das coleções
+async function hydrateProfessionals() {
+    try {
+        const [agSnap, resSnap] = await Promise.all([
+            getDocs(collection(db, "agendamentos")),
+            getDocs(collection(db, "reservas_profissional")),
+        ]);
+
+        const set = new Set();
+        agSnap.forEach(d => {
+            const v = d.data();
+            const p = v.profissional || v.profLabel || v.prof || null;
+            if (p) set.add(p);
+        });
+        resSnap.forEach(d => {
+            const v = d.data();
+            const p = v.profissional || v.profLabel || v.prof || null;
+            if (p) set.add(p);
+        });
+
+        const options = ['<option value="">Selecione...</option>', ...[...set].sort().map(p => `<option value="${p}">${p}</option>`)].join("");
+        profissionalSelect.innerHTML = options;
+        relProf.innerHTML = options;
+    } catch (e) {
+        console.error("Erro ao hidratar profissionais:", e);
+        const fallback = '<option value="">Selecione...</option>';
+        profissionalSelect.innerHTML = fallback;
+        relProf.innerHTML = fallback;
+    }
+}
+
 const init = async () => {
     const hoje = new Date().toISOString().split("T")[0];
     dataFiltro.value = hoje;
     relDe.value = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0];
     relAte.value = hoje;
 
-    // >>> apenas UM nome no seletor
-    const profOptions = `<option value="Profissional">Profissional</option>`;
-    profissionalSelect.innerHTML = profOptions;
-    relProf.innerHTML = profOptions;
-
+    // popular horas
     horaFiltro.innerHTML += HOURS.map((h) => `<option>${h}</option>`).join("");
+
+    // carregar profissionais
+    await hydrateProfessionals();
 
     buscarBtn.addEventListener("click", buscarAgenda);
     profissionalSelect.addEventListener("change", buscarAgenda);
@@ -747,7 +832,6 @@ const init = async () => {
     );
 
     showTab("agenda");
-    buscarAgenda();
     validateClientForm();
 };
 

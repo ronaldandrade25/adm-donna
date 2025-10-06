@@ -105,18 +105,15 @@ const ensureISODate = (input) => {
     if (!input) return "";
     const s = String(input).trim();
 
-    // 1) Já está em ISO
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // já ISO
 
-    // 2) DD/MM/YYYY ou DD-MM-YYYY
-    let m = s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+    let m = s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/); // dd/mm/yyyy
     if (m) return `${m[3]}-${m[2]}-${m[1]}`;
 
-    // 3) Tentativa genérica
-    const d = new Date(s);
+    const d = new Date(s); // fallback
     if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
 
-    return ""; // desconhecido
+    return "";
 };
 
 /* =========================================
@@ -389,7 +386,7 @@ async function buscarAgenda() {
 }
 
 /* =========================================
-   Editar / Apagar (suporta agendamentos e reservas_profissional)
+   Editar / Apagar
 ========================================= */
 const mainModal = {
     el: $("#mainModal"),
@@ -467,7 +464,6 @@ async function openEditAny(source, id, collOpt) {
             ]
         });
     } else {
-        // ==== RESERVA (reservas_profissional) – COM SERVIÇO/VALOR/FORMA ====
         const ref = doc(db, collOpt, id);
         const snap = await getDoc(ref);
         if (!snap.exists()) return showNotification("Reserva não encontrada.", "error");
@@ -481,18 +477,14 @@ async function openEditAny(source, id, collOpt) {
             body: `
         <div class="form-grid">
           <div class="field"><label>Nome</label><input id="rNome" value="${d.nome || ""}"></div>
-
           <div class="form-row">
             <div class="field"><label>Data</label><input type="date" id="rData" value="${ensureISODate(d.data) || ""}"></div>
             <div class="field"><label>Hora</label><select id="rHora">${HOURS_OPTS}</select></div>
           </div>
-
           <div class="field"><label>Telefone</label><input id="rTel" value="${d.telefone || ""}"></div>
-
           <div class="field"><label>Serviço</label>
             <input id="rServico" placeholder="Ex.: Design de Sobrancelha" value="${d.servico || ""}">
           </div>
-
           <div class="form-row">
             <div class="field"><label>Valor (R$)</label>
               <input type="number" step="0.01" id="rValor" value="${(typeof d.valor === "number" ? d.valor : "")}">
@@ -512,14 +504,11 @@ async function openEditAny(source, id, collOpt) {
                             hora: $("#rHora").value,
                             telefone: $("#rTel").value.trim(),
                         };
-
                         const serv = $("#rServico").value.trim();
                         if (serv) payload.servico = serv;
-
                         const valorStr = $("#rValor").value;
                         const val = Number.parseFloat(valorStr);
                         if (!Number.isNaN(val)) payload.valor = val;
-
                         const forma = $("#rForma").value;
                         if (forma) payload.pagamentoForma = forma;
 
@@ -535,6 +524,72 @@ async function openEditAny(source, id, collOpt) {
             ]
         });
     }
+}
+
+/* ========= NOVO: Criar agendamento ao clicar em “+ Agendar Horário” ========= */
+async function openCreateAt(hour) {
+    const prof = profissionalSelect.value;
+    if (!prof) { showNotification("Selecione o profissional para agendar.", "error"); return; }
+
+    const iso = ensureISODate(dataFiltro.value) || new Date().toISOString().slice(0, 10);
+    const HOURS_OPTS = HOURS.map(h => `<option ${h === hour ? "selected" : ""}>${h}</option>`).join("");
+    const PAYMENT_OPTS = PAYMENT_METHODS.map(p => `<option>${p}</option>`).join("");
+
+    mainModal.show({
+        title: "Novo Agendamento",
+        body: `
+      <div class="form-grid">
+        <div class="field"><label>Cliente</label><input id="modalNewCliente" placeholder="Nome do cliente"></div>
+        <div class="form-row">
+          <div class="field"><label>Data</label><input type="date" id="modalNewDate" value="${iso}"></div>
+          <div class="field"><label>Hora</label><select id="modalNewTime">${HOURS_OPTS}</select></div>
+        </div>
+        <div class="field"><label>Serviço</label><input id="modalNewServico" placeholder="Ex.: Corte Tesoura"></div>
+        <div class="form-row">
+          <div class="field"><label>Valor (R$)</label><input type="number" id="modalNewValor" value="0" step="0.01"></div>
+          <div class="field"><label>Forma de Pagamento</label><select id="modalNewPaymentMethod">${PAYMENT_OPTS}</select></div>
+        </div>
+        <div class="field"><small style="color:var(--text-light)">Profissional: <strong>${prof}</strong></small></div>
+      </div>`,
+        buttons: [
+            { text: "Cancelar", class: "btn-light" },
+            {
+                text: "Salvar", class: "btn-primary", onClick: async () => {
+                    const nome = capitalizeName($("#modalNewCliente").value);
+                    const dataISO = $("#modalNewDate").value;
+                    const horaSel = $("#modalNewTime").value;
+                    const servico = $("#modalNewServico").value.trim();
+                    const valor = Number.parseFloat($("#modalNewValor").value) || 0;
+                    const pagamentoForma = $("#modalNewPaymentMethod").value;
+
+                    if (!nome) { showNotification("Informe o nome do cliente.", "error"); return false; }
+                    if (!dataISO) { showNotification("Informe a data.", "error"); return false; }
+                    if (!horaSel) { showNotification("Informe a hora.", "error"); return false; }
+
+                    try {
+                        await addDoc(collection(db, "agendamentos"), {
+                            clienteNome: nome,
+                            dataISO,
+                            hora: horaSel,
+                            servico: servico || "—",
+                            valor,
+                            pagamentoForma,
+                            profissional: prof,
+                            profissionalKey: normalize(prof),
+                            bloqueado: false,
+                            createdAt: serverTimestamp(),
+                        });
+                        showNotification("Agendamento criado!");
+                        buscarAgenda();
+                    } catch (err) {
+                        console.error(err);
+                        showNotification("Erro ao criar agendamento.", "error");
+                        return false;
+                    }
+                }
+            }
+        ]
+    });
 }
 
 async function deleteAny(source, id, collOpt) {
@@ -564,7 +619,12 @@ agendaGrid.addEventListener("click", (e) => {
     if (!btn) return;
 
     const action = btn.dataset.action;
-    if (action === "schedule") return;
+
+    if (action === "schedule") {
+        const hour = btn.dataset.time || "";
+        openCreateAt(hour);
+        return;
+    }
 
     const source = btn.dataset.source; // "ag" | "res"
     const id = btn.dataset.id;
@@ -578,7 +638,9 @@ agendaGrid.addEventListener("click", (e) => {
    Relatórios / Pagamentos
 ========================================= */
 const renderReportChart = (data) => {
-    const ctx = document.getElementById("reportsChart").getContext("2d");
+    const ctx = document.getElementById("reportsChart")?.getContext("2d");
+    if (!ctx) return;
+
     const revenueByService = new Map();
     data.forEach((i) => {
         const s = i.servico || "Não especificado";
@@ -588,7 +650,7 @@ const renderReportChart = (data) => {
     const values = [...revenueByService.values()];
 
     if (reportsChartInstance) reportsChartInstance.destroy();
-    const legendContainer = document.getElementById("reportsChartLegend"); legendContainer.innerHTML = "";
+    const legendContainer = document.getElementById("reportsChartLegend"); if (legendContainer) legendContainer.innerHTML = "";
 
     // eslint-disable-next-line no-undef
     reportsChartInstance = new Chart(ctx, {
@@ -610,13 +672,15 @@ const renderReportChart = (data) => {
         }
     });
 
-    reportsChartInstance.data.labels.forEach((label, idx) => {
-        const color = reportsChartInstance.data.datasets[0].backgroundColor[idx % reportsChartInstance.data.datasets[0].backgroundColor.length];
-        const item = document.createElement("div");
-        item.className = "legend-item";
-        item.innerHTML = `<span class="legend-color-box" style="background-color:${color}"></span><span>${label}</span>`;
-        legendContainer.appendChild(item);
-    });
+    if (legendContainer) {
+        reportsChartInstance.data.labels.forEach((label, idx) => {
+            const color = reportsChartInstance.data.datasets[0].backgroundColor[idx % reportsChartInstance.data.datasets[0].backgroundColor.length];
+            const item = document.createElement("div");
+            item.className = "legend-item";
+            item.innerHTML = `<span class="legend-color-box" style="background-color:${color}"></span><span>${label}</span>`;
+            legendContainer.appendChild(item);
+        });
+    }
 };
 
 // helper para filtrar por intervalo de datas (strings YYYY-MM-DD)
@@ -627,7 +691,7 @@ const isInISODateRange = (d, de, ate) => {
     return ge && le;
 };
 
-// >>> LISTENER do botão "Gerar" — agora lê AGENDAMENTOS + RESERVAS_PROFISSIONAL
+// >>> LISTENER do botão "Gerar" — lê AGENDAMENTOS + RESERVAS_PROFISSIONAL
 relGerarBtn.addEventListener("click", async () => {
     const de = relDe.value, ate = relAte.value, prof = relProf.value;
     if (!prof) return showNotification("Escolha o profissional.", "error");
@@ -635,7 +699,6 @@ relGerarBtn.addEventListener("click", async () => {
     relDetalheTbody.innerHTML = `<tr><td colspan="6" class="loading-row">Gerando...</td></tr>`;
 
     try {
-        // 1) Agendamentos
         const qAg = query(collection(db, "agendamentos"), where("profissional", "==", prof));
         const snapAg = await getDocs(qAg);
         const rowsAg = snapAg.docs.map(d => {
@@ -650,7 +713,6 @@ relGerarBtn.addEventListener("click", async () => {
             };
         });
 
-        // 2) Reservas do site
         const qRes = query(collection(db, "reservas_profissional"), where("profissional", "==", prof));
         const snapRes = await getDocs(qRes);
         const rowsRes = snapRes.docs.map(d => {
@@ -667,13 +729,11 @@ relGerarBtn.addEventListener("click", async () => {
             };
         });
 
-        // 3) Junta, filtra e ordena
         reportCache = [...rowsAg, ...rowsRes]
             .filter(r => !r.bloqueado && isInISODateRange(r.iso, de, ate));
 
         reportCache.sort((a, b) => ((a.iso || "") + (a.hora || "")).localeCompare((b.iso || "") + (b.hora || "")));
 
-        // 4) KPIs
         const qtd = reportCache.length;
         const bruto = reportCache.reduce((s, it) => s + (Number(it.valor) || 0), 0);
         const ticket = qtd ? bruto / qtd : 0;
@@ -681,7 +741,6 @@ relGerarBtn.addEventListener("click", async () => {
         kpiBruto.textContent = formatCurrency(bruto);
         kpiTicket.textContent = formatCurrency(ticket);
 
-        // 5) Tabela
         relDetalheTbody.innerHTML =
             reportCache.length === 0
                 ? `<tr><td colspan="6" class="loading-row">Nenhum resultado.</td></tr>`
@@ -695,7 +754,6 @@ relGerarBtn.addEventListener("click", async () => {
             <td data-label="Valor">${formatCurrency(r.valor)}</td>
           </tr>`).join("");
 
-        // 6) Gráfico
         renderReportChart(reportCache);
     } catch (err) {
         console.error("Erro ao gerar relatório:", err);
@@ -809,10 +867,8 @@ const init = async () => {
     relDe.value = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0];
     relAte.value = hoje;
 
-    // popular horas
     horaFiltro.innerHTML += HOURS.map((h) => `<option>${h}</option>`).join("");
 
-    // carregar profissionais
     await hydrateProfessionals();
 
     buscarBtn.addEventListener("click", buscarAgenda);
